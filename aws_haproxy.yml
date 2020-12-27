@@ -1,0 +1,121 @@
+- hosts: localhost
+  vars_files:
+          - aws_key.yml
+  tasks:
+  
+  - name: "Create a Custom Key_Pair for EC2"
+    ec2_key:
+          aws_access_key: "{{ access_key }}"
+          aws_secret_key: "{{ secret_key }}"
+          key_material: "{{ lookup('file', '/root/.ssh/id_rsa.pub') }}"
+          state: present
+          name: "Key_1"
+  - name: "Provisioning a New Instance(OS_for_LB) for Front End Server"
+    ec2_instance:
+          aws_access_key: "{{ access_key }}"
+          aws_secret_key: "{{ secret_key }}"
+          region: ap-south-1
+          image_id: ami-08f63db601b82ff5f
+          instance_type: t2.micro
+          state: present
+          name: "OS_for_LB"
+          vpc_subnet_id: subnet-a92920c1
+          key_name: "Key_1"
+    register: x1
+
+  - name: "Provisioning other Instance(OS_1) for Back End Server"
+    ec2_instance:
+          aws_access_key: "{{ access_key }}"
+          aws_secret_key: "{{ secret_key }}"
+          region: ap-south-1
+          image_id: ami-08f63db601b82ff5f
+          instance_type: t2.micro
+          state: present
+          name: "OS_1"
+          vpc_subnet_id: subnet-a92920c1
+          key_name: "Key_1"
+    register: x2
+
+  - name: "Provisioning 2nd other Instance(OS_2) for Back End Server"
+    ec2_instance:
+          aws_access_key: "{{ access_key }}"
+          aws_secret_key: "{{ secret_key }}"
+          region: ap-south-1
+          image_id: ami-08f63db601b82ff5f
+          instance_type: t2.micro
+          state: present
+          name: "OS_2"
+          vpc_subnet_id: subnet-a92920c1
+          key_name: "Key_1"
+    register: x3
+
+  - name: "Add all those Instance's IP Address in Inventory"
+    blockinfile:
+          path: "/root/inven_ansible"
+          block: |
+                  [Front_End_Server]
+                  {{ x1.instances[0].network_interfaces[0].association['public_ip'] }} ansible_user=ec2-user ansible_ssh_private_key_file=/root/.ssh/id_rsa.pub ansible_connection=ssh
+                  [Back_End_Server]
+                  {{ x2.instances[0].network_interfaces[0].association['public_ip'] }} ansible_user=ec2-user ansible_ssh_private_key_file=/root/.ssh/id_rsa.pub ansible_connection=ssh
+                  {{ x3.instances[0].network_interfaces[0].association['public_ip'] }} ansible_user=ec2-user ansible_ssh_private_key_file=/root/.ssh/id_rsa.pub ansible_connection=ssh
+
+
+- hosts: Back_End_Server
+
+  tasks:
+  - name: "Install HTTPD Software"
+    package:
+        name: "httpd"
+        state: present
+
+  - name: "Start the Service"
+    service:
+            name: "httpd"
+            state: started
+            enabled: yes
+
+  - name: "Deploy Some PHP File in Root Directory"
+    copy:
+            dest: "/var/www/html/ar.html"
+            content: "<h1>{{ ansible_facts['default_ipv4']['address'] }}</h1>"
+
+
+- hosts: Front_End_Server
+
+  tasks:
+  - name: "Install Haproxy Software for Setup Server As a Load Balancer"
+    package:
+            name: "haproxy"
+            state: present
+
+  - name: "Change Main Port number in Configuration File"
+    replace:
+            path: "/etc/haproxy/haproxy.cfg"
+            regexp: ":5000"
+            replace: ":8081"
+
+  - name: "Remove line from Configuration File"
+    lineinfile:
+            path: "/etc/haproxy/haproxy.cfg"
+            regexp: "    server  app{{ item }} 127.0.0.1:500{{ item }} check"
+            state: absent
+    with_items:
+            - 1
+            - 2
+            - 3
+            - 4
+
+  - name: "Add Back End Server(Instance's) IP Address in Configuration File"
+    blockinfile:
+            path: "/etc/haproxy/haproxy.cfg"
+            block: |
+                     {% for i in groups['Back_End_Server'] %}
+                     server app{{ loop.index }} {{ i }}:80
+                     {% endfor %}
+    notify: restart_service
+
+  handlers:
+          - name: restart_service
+            service:
+                    name: "haproxy"
+                    state: restarted
